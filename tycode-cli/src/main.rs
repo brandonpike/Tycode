@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
-use tracing::info;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -40,13 +39,9 @@ struct Args {
     #[arg(long)]
     compact: bool,
 
-    /// Auto mode: run until task completion then exit
+    /// Auto-task mode: run until task completion then exit
     #[arg(long)]
-    auto: bool,
-
-    /// Task description for auto mode
-    #[arg(long)]
-    task: Option<String>,
+    auto_task: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -58,16 +53,19 @@ fn main() -> Result<()> {
 
     runtime.block_on(async {
         let local = tokio::task::LocalSet::new();
-        local.run_until(async_main()).await
+        local.run_until(run()).await
     })
 }
 
-async fn async_main() -> Result<()> {
-    let args = Args::parse();
-
-    if args.auto && args.task.is_none() {
-        return Err(anyhow::anyhow!("--auto requires --task to be specified"));
-    }
+async fn run() -> Result<()> {
+    let Args {
+        workspace_roots,
+        profile,
+        auto_pr,
+        draft,
+        compact,
+        auto_task,
+    } = Args::parse();
 
     if std::env::var("RUST_LOG").is_ok() {
         tracing_subscriber::fmt()
@@ -76,29 +74,29 @@ async fn async_main() -> Result<()> {
             .init();
     }
 
-    let workspace_roots = args
-        .workspace_roots
+    let workspace_roots = workspace_roots
         .map(|roots| roots.into_iter().map(canonicalize_workspace_root).collect())
         .transpose()?;
 
-    if let Some(issue_number) = args.auto_pr {
+    if let Some(issue_number) = auto_pr {
         let roots = workspace_roots.unwrap_or_else(|| {
             vec![std::env::current_dir().expect("Failed to get current directory")]
         });
-        return auto_pr::run_auto_pr(issue_number, roots, args.profile, args.draft).await;
+        return auto_pr::run_auto_pr(issue_number, roots, profile, draft).await;
     }
 
-    if args.auto {
-        let roots = workspace_roots.unwrap_or_else(|| {
-            vec![std::env::current_dir().expect("Failed to get current directory")]
-        });
-        return auto::run_auto(args.task.unwrap(), roots, args.profile).await;
+    match auto_task {
+        Some(auto_task) => {
+            let roots = workspace_roots.unwrap_or_else(|| {
+                vec![std::env::current_dir().expect("Failed to get current directory")]
+            });
+            auto::run_auto(auto_task, roots, profile).await
+        }
+        None => {
+            let mut app = InteractiveApp::new(workspace_roots, profile, compact).await?;
+            app.run().await
+        }
     }
-
-    let mut app = InteractiveApp::new(workspace_roots, args.profile, args.compact).await?;
-    app.run().await?;
-
-    Ok(())
 }
 
 fn canonicalize_workspace_root(root: String) -> Result<PathBuf> {
@@ -137,6 +135,6 @@ fn setup_tracing() -> Result<()> {
         .with(EnvFilter::new("info"))
         .init();
 
-    info!("Tracing initialized to {:?}", log_file);
+    tracing::info!("Tracing initialized to {:?}", log_file);
     Ok(())
 }
